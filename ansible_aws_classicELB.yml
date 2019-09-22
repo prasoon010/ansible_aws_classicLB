@@ -1,0 +1,307 @@
+---
+- name: "Playbook to create AWS Classic Load balancer infra"
+  hosts: localhost
+  connection: local
+  vars:
+    key_name: devops
+    region: "us-east-2"
+    vpc_name: "my_vpc"
+    vpc_cidr_block: 172.16.0.0/16
+    public_subnet_1_cidr: 172.16.0.0/20
+    public_subnet_2_cidr: 172.16.16.0/20
+    private_subnet_1_cidr: 172.16.32.0/20
+    private_subnet_2_cidr: 172.16.48.0/20
+    image: ami-05c1fa8df71875112
+    instance_type: t2.micro
+
+  tasks:
+
+    - name: "Create new EC2 key"
+      ec2_key:
+        name: "{{ key_name }}"
+        region: "{{ region }}"
+      register: ec2_key_result
+
+    - name: "Save private key"
+      when: ec2_key_result.changed == true
+      copy:
+        content: "{{ ec2_key_result.key.private_key }}"
+        dest: "./{{ key_name }}.pem"
+        mode: 0600
+
+    - name: "Creating VPC"
+      ec2_vpc_net:
+        name: "{{ vpc_name }}"
+        cidr_block: "{{ vpc_cidr_block }}"
+        region: "{{ region }}"
+        state: present
+      register: vpc_result
+
+    - wait_for:
+        timeout: 10
+
+    - name: "Set vpc id in variable"
+      set_fact:
+        vpc_id: "{{ vpc_result.vpc.id }}"
+
+
+    - name: "Creating public subnet for ELB1 server [AZ-1]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ public_subnet_1_cidr }}"
+        az: "{{ region }}a"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "public_subnet_1"
+      register: public_subnet_az1
+
+    - name: "Set public subnet id in variable [AZ-1]"
+      set_fact:
+        public_subnet_az1_id: "{{ public_subnet_az1.subnet.id }}"
+
+    - name: "Creating public subnet for ELB2 server [AZ-2]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ public_subnet_2_cidr }}"
+        az: "{{ region }}b"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "public_subnet_2"
+      register: public_subnet_az2
+
+    - name: "Set public subnet id in variable [AZ-2]"
+      set_fact:
+        public_subnet_az2_id: "{{ public_subnet_az2.subnet.id }}"
+
+
+    - name: "Creating private subnet for webserver1 server [AZ-1]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ private_subnet_1_cidr }}"
+        az: "{{ region }}a"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "private_subnet_1"
+      register: private_subnet_az1
+
+    - name: "Set private subnet id in variable [AZ-1]"
+      set_fact:
+        private_subnet_az1_id: "{{ private_subnet_az1.subnet.id }}"
+
+
+    - name: "Creating private subnet for webserver2 server [AZ-2]"
+      ec2_vpc_subnet:
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        cidr: "{{ private_subnet_1_cidr }}"
+        az: "{{ region }}b"
+        region: "{{ region }}"
+        wait: yes
+        resource_tags:
+           Name: "private_subnet_2"
+      register: private_subnet_az2
+
+    - name: "Set private subnet id in variable [AZ-2]"
+      set_fact:
+        private_subnet_az2_id: "{{ private_subnet_az2.subnet.id }}"
+
+
+    - name: "Creating security group for ELB"
+      ec2_group:
+        name: "elb_sg"
+        description: "elb_sg"
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+              - 80
+              - 443
+            cidr_ip: 0.0.0.0/0
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: elb_sg
+
+    - name: "Set ELB security group id in variable"
+      set_fact:
+        elb_sg_id: "{{ elb_sg.group_id }}"
+
+
+    - name: "Creating security group for webservers"
+      ec2_group:
+        name: "webserver_sg"
+        description: "webserver_sg"
+        state: present
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        rules:
+          - proto: tcp
+            ports:
+              - 22
+              - 80
+              - 443
+            group_id: "{{ webserver_sg_id }}"
+        rules_egress:
+          - proto: all
+            cidr_ip: 0.0.0.0/0
+      register: webserver_sg
+
+    - name: "Set backend security group id in variable"
+      set_fact:
+        webserver_sg_id: "{{ webserver_sg.group_id }}"
+
+
+    - name: "Creating Internet gateway"
+      ec2_vpc_igw:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        state: present
+        tags:
+          Name: MY_IGW
+      register: igw_result
+
+    - name: "Set Internet gateway id in variable"
+      set_fact:
+        igw_id: "{{ igw_result.gateway_id }}"
+
+    - name: "Creating NAT gateway"
+      ec2_vpc_nat_gateway:
+        state: present
+        subnet_id: "{{ public_subnet_az1_id }}"
+        wait: yes
+        region: "{{ region }}"
+        if_exist_do_not_create: true
+      register: nat_gw_result
+
+    - name: "Set NAT gateway id in variable"
+      set_fact:
+        nat_gw_id: "{{ nat_gw_result.nat_gateway_id }}"
+
+
+    - name: "Creating public subnet RT with igw"
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        tags:
+          Name: public_RT
+        subnets:
+          - "{{ public_subnet_az1_id }}"
+          - "{{ public_subnet_az2_id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ igw_id }}"
+      register: public_rt_result
+
+    - name: "Creating private subnet RT with NAT"
+      ec2_vpc_route_table:
+        vpc_id: "{{ vpc_id }}"
+        region: "{{ region }}"
+        tags:
+          Name: private_RT
+        subnets:
+          - "{{ private_subnet_az1_id }}"
+          - "{{ private_subnet_az2_id }}"
+        routes:
+          - dest: 0.0.0.0/0
+            gateway_id: "{{ nat_gw_id }}"
+      register: private_rt_result
+
+
+    - name: "Creating EC2 instance - webserver1"
+      ec2:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        zone: "{{ region }}a"
+        vpc_subnet_id: "{{ private_subnet_az1_id }}"
+        group: webserver_sg
+        assign_public_ip: no
+        volumes:
+          - device_name: /dev/xvda
+            volume_type: gp2
+            volume_size: 8
+        wait: yes
+        count_tag:
+          Name: "Webserver_1"
+        instance_tags:
+          Name: "Webserver_1"
+        exact_count: 1
+        user_data: "{{ lookup('file', 'backend_userdata') }}"
+      register: webserver1_result
+
+    - name: "Set ec2 instance id in variable"
+      set_fact:
+        webserver1_ip: "{{ webserver1_result.tagged_instances[0].private_ip }}"
+        webserver1_id: "{{ webserver1_result.tagged_instances[0].id }}"
+
+    - name: "Creating EC2 instance - webserver2"
+      ec2:
+        key_name: "{{ key_name }}"
+        instance_type: "{{ instance_type }}"
+        image: "{{ image }}"
+        region: "{{ region }}"
+        zone: "{{ region }}b"
+        vpc_subnet_id: "{{ private_subnet_az2_id }}"
+        group: webserver_sg
+        assign_public_ip: no
+        volumes:
+          - device_name: /dev/xvda
+            volume_type: gp2
+            volume_size: 8
+        wait: yes
+        count_tag:
+          Name: "Webserver_2"
+        instance_tags:
+          Name: "Webserver_2"
+        exact_count: 1
+        user_data: "{{ lookup('file', 'webserver_userdata') }}"
+      register: webserver2_result
+
+    - name: "Set ec2 instance id in variable"
+      set_fact:
+        webserver2_ip: "{{ webserver2_result.tagged_instances[0].private_ip }}"
+        webserver2_id: "{{ webserver2_result.tagged_instances[0].id }}"
+
+
+    - name: "Creating classic ELB"
+      ec2_elb_lb:
+        state: present
+        name: "myELB"
+        region: "{{ region }}"
+        subnets:
+          - public_subnet_az1_id
+          - public_subnet_az2_id
+        cross_az_load_balancing: "yes"
+        connection_draining_timeout: 60
+        listeners:
+          protocol: http
+          load_balancer_port: 80
+          instance_port: 80
+        security_group_names: elb_sg
+        health_check:
+          ping_protocol: tcp
+          ping_port: 80
+          response_timeout: 5
+          interval: 30
+          unhealthy_threshold: 2
+          healthy_threshold: 5
+        instance_ids: "{{ item }}"
+        tags:
+          Name: myELB
+      with_items:
+        - webserver1_id
+        - webserver2_id
+      register: elb_result
+
+    - debug:
+        var: elb_result
