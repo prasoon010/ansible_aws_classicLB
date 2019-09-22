@@ -99,7 +99,7 @@
       ec2_vpc_subnet:
         state: present
         vpc_id: "{{ vpc_id }}"
-        cidr: "{{ private_subnet_1_cidr }}"
+        cidr: "{{ private_subnet_2_cidr }}"
         az: "{{ region }}b"
         region: "{{ region }}"
         wait: yes
@@ -149,7 +149,7 @@
               - 22
               - 80
               - 443
-            group_id: "{{ webserver_sg_id }}"
+            cidr_ip: 0.0.0.0/0
         rules_egress:
           - proto: all
             cidr_ip: 0.0.0.0/0
@@ -236,7 +236,7 @@
         instance_tags:
           Name: "Webserver_1"
         exact_count: 1
-        user_data: "{{ lookup('file', 'backend_userdata') }}"
+        user_data: "{{ lookup('file', 'webserver_userdata') }}"
       register: webserver1_result
 
     - name: "Set ec2 instance id in variable"
@@ -272,6 +272,9 @@
         webserver2_ip: "{{ webserver2_result.tagged_instances[0].private_ip }}"
         webserver2_id: "{{ webserver2_result.tagged_instances[0].id }}"
 
+    - wait_for:
+        timeout: 60
+
 
     - name: "Creating classic ELB"
       ec2_elb_lb:
@@ -279,14 +282,14 @@
         name: "myELB"
         region: "{{ region }}"
         subnets:
-          - public_subnet_az1_id
-          - public_subnet_az2_id
+          - "{{ public_subnet_az1_id }}"
+          - "{{ public_subnet_az2_id }}"
         cross_az_load_balancing: "yes"
         connection_draining_timeout: 60
         listeners:
-          protocol: http
-          load_balancer_port: 80
-          instance_port: 80
+          - protocol: http
+            load_balancer_port: 80
+            instance_port: 80
         security_group_names: elb_sg
         health_check:
           ping_protocol: tcp
@@ -295,13 +298,14 @@
           interval: 30
           unhealthy_threshold: 2
           healthy_threshold: 5
-        instance_ids: "{{ item }}"
+        instance_ids:
+          - "{{ webserver1_id }}"
+          - "{{ webserver2_id }}"
         tags:
           Name: myELB
-      with_items:
-        - webserver1_id
-        - webserver2_id
       register: elb_result
 
-    - debug:
-        var: elb_result
+    - name: "ELB public DNS name"
+      debug:
+        msg: "ELB DNS name: {{ elb_result.elb.dns_name }}"
+
